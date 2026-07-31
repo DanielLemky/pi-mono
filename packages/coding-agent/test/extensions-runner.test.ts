@@ -907,8 +907,8 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("command context", () => {
-		it("passes fork options through to the bound handler", async () => {
+	describe("session replacement context", () => {
+		it("passes fork options from event and command contexts through to the bound handler", async () => {
 			const runtime = createExtensionRuntime();
 			const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
 			const fork = vi.fn(async () => ({ cancelled: false }));
@@ -922,10 +922,11 @@ describe("ExtensionRunner", () => {
 				reload: async () => {},
 			});
 
-			const commandContext = runner.createCommandContext();
-			await commandContext.fork("entry-1");
+			const eventContext = runner.createContext();
+			await eventContext.fork("entry-1");
 			expect(fork).toHaveBeenCalledWith("entry-1", undefined);
 
+			const commandContext = runner.createCommandContext();
 			await commandContext.fork("entry-2", { position: "at" });
 			expect(fork).toHaveBeenLastCalledWith("entry-2", { position: "at" });
 		});

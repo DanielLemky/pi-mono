@@ -1080,7 +1080,7 @@ pi.on("before_agent_start", (event, ctx) => {
 
 ## ExtensionCommandContext
 
-Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with session control methods. These are only available in commands because they can deadlock if called from event handlers.
+Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with additional session control methods. `ctx.newSession()`, `ctx.switchSession()`, and tree navigation remain command-only. `ctx.fork()` is also available on the base `ExtensionContext`, so a trusted semantic extension event can ask the authoritative host to run the same serialized runtime replacement as native `/fork` and `/clone`.
 
 ### ctx.getSystemPromptOptions()
 
@@ -1141,9 +1141,9 @@ Options:
 - `setup`: mutate the new session's `SessionManager` before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
-### ctx.fork(entryId, options?)
+### ctx.fork(entryId, options?) (all contexts)
 
-Fork from a specific entry, creating a new session file:
+Fork from a specific entry using the host's native session replacement lifecycle. Unlike the other methods in this section, this is available to event handlers through `ExtensionContext` as well as command handlers:
 
 ```typescript
 const result = await ctx.fork("entry-id-123", {

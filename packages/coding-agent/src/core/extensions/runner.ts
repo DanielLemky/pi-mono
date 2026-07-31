@@ -742,6 +742,10 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
 			},
+			fork: (entryId, options) => {
+				runner.assertActive();
+				return runner.forkHandler(entryId, options);
+			},
 		};
 	}
 
@@ -764,10 +768,6 @@ export class ExtensionRunner {
 		context.newSession = (options) => {
 			this.assertActive();
 			return this.newSessionHandler(options);
-		};
-		context.fork = (entryId, options) => {
-			this.assertActive();
-			return this.forkHandler(entryId, options);
 		};
 		context.navigateTree = (targetId, options) => {
 			this.assertActive();

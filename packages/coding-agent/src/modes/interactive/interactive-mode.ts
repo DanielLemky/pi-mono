@@ -1828,6 +1828,11 @@ export class InteractiveMode {
 				})();
 			},
 			getSystemPrompt: () => this.session.systemPrompt,
+			fork: async (entryId, options) => {
+				const result = await this.runtimeHost.fork(entryId, options);
+				if (!result.cancelled) this.editor.setText(result.selectedText ?? "");
+				return { cancelled: result.cancelled };
+			},
 		});
 
 		// Set up the extension shortcut handler on the default editor
