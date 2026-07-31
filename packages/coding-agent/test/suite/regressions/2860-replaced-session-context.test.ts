@@ -220,6 +220,7 @@ describe("regression #2860: replaced session callbacks", () => {
 						await ctx.fork(leafId, {
 							position: "at",
 							withSession: async (replacedCtx) => {
+								replacedCtx.setSessionName("source-fork");
 								await replacedCtx.sendUserMessage("fork callback message");
 							},
 						});
@@ -230,8 +231,12 @@ describe("regression #2860: replaced session callbacks", () => {
 		);
 
 		await runtime.session.prompt("seed");
+		runtime.session.setSessionName("source");
+		const sourceSessionFile = runtime.session.sessionFile!;
 		await runtime.session.prompt("/fork-it");
 
+		expect(runtime.session.sessionName).toBe("source-fork");
+		expect(SessionManager.open(sourceSessionFile).getSessionName()).toBe("source");
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:seed",
 			"assistant:seed reply",

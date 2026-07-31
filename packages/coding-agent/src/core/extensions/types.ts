@@ -398,6 +398,9 @@ export interface ExtensionCommandContext extends ExtensionContext {
  * This is passed to `withSession()` callbacks on `newSession()`, `fork()`, and `switchSession()`.
  */
 export interface ReplacedSessionContext extends ExtensionCommandContext {
+	/** Set the replacement session's display name. */
+	setSessionName(name: string): void;
+
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
