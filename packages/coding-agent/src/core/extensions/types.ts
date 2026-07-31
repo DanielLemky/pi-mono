@@ -347,8 +347,10 @@ export interface ExtensionContext {
 
 	/**
 	 * Fork from a specific entry using the host's native session replacement flow.
-	 * Available to semantic extension events as well as extension commands. The
-	 * host remains authoritative for runtime teardown/rebind and editor state.
+	 * Event handlers may retain their current context for an out-of-band callback
+	 * and call this after awaited event dispatch has returned. Calling it from
+	 * inside an awaited event handler is rejected to prevent replacement deadlocks.
+	 * The host remains authoritative for runtime teardown/rebind and editor state.
 	 */
 	fork(
 		entryId: string,

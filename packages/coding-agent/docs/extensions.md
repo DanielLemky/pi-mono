@@ -1080,7 +1080,7 @@ pi.on("before_agent_start", (event, ctx) => {
 
 ## ExtensionCommandContext
 
-Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with additional session control methods. `ctx.newSession()`, `ctx.switchSession()`, and tree navigation remain command-only. `ctx.fork()` is also available on the base `ExtensionContext`, so a trusted semantic extension event can ask the authoritative host to run the same serialized runtime replacement as native `/fork` and `/clone`.
+Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with additional session control methods. `ctx.newSession()`, `ctx.switchSession()`, and tree navigation remain command-only. `ctx.fork()` is also present on the base `ExtensionContext` for active, out-of-band callbacks that run after awaited extension event dispatch has returned.
 
 ### ctx.getSystemPromptOptions()
 
@@ -1141,9 +1141,11 @@ Options:
 - `setup`: mutate the new session's `SessionManager` before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
-### ctx.fork(entryId, options?) (all contexts)
+### ctx.fork(entryId, options?)
 
-Fork from a specific entry using the host's native session replacement lifecycle. Unlike the other methods in this section, this is available to event handlers through `ExtensionContext` as well as command handlers:
+Fork from a specific entry using the host's native session replacement lifecycle. In addition to command handlers, an extension may retain its active `ExtensionContext` and call `fork()` later from an out-of-band callback, such as a socket or timer callback after the event handler has returned.
+
+Do not call or await `ctx.fork()` inside an awaited `pi.on(...)` event handler. Session replacement can invalidate the dispatch frame that is waiting for the handler, so the runner rejects that call with a clear error instead of allowing a deadlock. The retained context must still be active; normal stale-context guards apply after replacement or reload.
 
 ```typescript
 const result = await ctx.fork("entry-id-123", {

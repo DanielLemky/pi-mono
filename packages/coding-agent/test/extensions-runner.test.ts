@@ -908,7 +908,63 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("session replacement context", () => {
-		it("passes fork options from event and command contexts through to the bound handler", async () => {
+		it("rejects fork from awaited event dispatch instead of entering replacement", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "unsafe-fork.ts"),
+				`export default function (pi) {
+					pi.on("session_start", async (_event, ctx) => {
+						await ctx.fork("entry-unsafe");
+					});
+				}`,
+			);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const fork = vi.fn(async () => ({ cancelled: false }));
+			runner.bindCommandContext({
+				waitForIdle: async () => {},
+				newSession: async () => ({ cancelled: false }),
+				fork,
+				navigateTree: async () => ({ cancelled: false }),
+				switchSession: async () => ({ cancelled: false }),
+				reload: async () => {},
+			});
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(error.error));
+
+			await runner.emit({ type: "session_start" });
+
+			expect(fork).not.toHaveBeenCalled();
+			expect(errors).toContain(
+				"ctx.fork() cannot run inside an awaited extension event handler; request it from an out-of-band callback after the handler returns",
+			);
+		});
+
+		it("allows fork from an event context after dispatch returns", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "out-of-band-fork.ts"),
+				`export default function (pi) {
+					pi.on("session_start", (_event, ctx) => {
+						setTimeout(() => void ctx.fork("entry-later"), 0);
+					});
+				}`,
+			);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const fork = vi.fn(async () => ({ cancelled: false }));
+			runner.bindCommandContext({
+				waitForIdle: async () => {},
+				newSession: async () => ({ cancelled: false }),
+				fork,
+				navigateTree: async () => ({ cancelled: false }),
+				switchSession: async () => ({ cancelled: false }),
+				reload: async () => {},
+			});
+
+			await runner.emit({ type: "session_start" });
+			await vi.waitFor(() => expect(fork).toHaveBeenCalledWith("entry-later", undefined));
+		});
+
+		it("passes fork options from an out-of-band context and command context through to the bound handler", async () => {
 			const runtime = createExtensionRuntime();
 			const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
 			const fork = vi.fn(async () => ({ cancelled: false }));
