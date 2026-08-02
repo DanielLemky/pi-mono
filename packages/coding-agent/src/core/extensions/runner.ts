@@ -309,6 +309,10 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		this.runtime.invokeCommand = (name, args) => {
+			this.runtime.assertActive();
+			return this.invokeCommand(name, args);
+		};
 	}
 
 	bindCore(
@@ -654,6 +658,34 @@ export class ExtensionRunner {
 		return this.resolveRegisteredCommands().find((command) => command.invocationName === name);
 	}
 
+	/** Invoke an extension command by its exact resolved invocation name. */
+	async invokeCommand(name: string, args = ""): Promise<void> {
+		this.assertActive();
+		if (this.eventHandlerDepth > 0) {
+			throw new Error(
+				"pi.invokeCommand() cannot run inside an awaited extension event handler; invoke it from an out-of-band callback after the handler returns",
+			);
+		}
+
+		const command = this.getCommand(name);
+		if (!command) {
+			throw new Error(`Unknown extension command: ${name}`);
+		}
+
+		const ctx = this.createCommandContext();
+		try {
+			await command.handler(args, ctx);
+		} catch (err) {
+			this.emitError({
+				extensionPath: command.sourceInfo.path,
+				event: "command",
+				error: err instanceof Error ? err.message : String(err),
+				stack: err instanceof Error ? err.stack : undefined,
+			});
+			throw err;
+		}
+	}
+
 	/**
 	 * Request a graceful shutdown. Called by extension tools and event handlers.
 	 * The actual shutdown behavior is provided by the mode via bindExtensions().
@@ -859,7 +891,9 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
-					const handlerResult = (await this.runEventHandler(() => handler(currentEvent, ctx))) as MessageEndEventResult | undefined;
+					const handlerResult = (await this.runEventHandler(() => handler(currentEvent, ctx))) as
+						| MessageEndEventResult
+						| undefined;
 					if (!handlerResult?.message) continue;
 
 					if (handlerResult.message.role !== currentMessage.role) {
@@ -900,7 +934,9 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = (await this.runEventHandler(() => handler(currentEvent, ctx))) as ToolResultEventResult | undefined;
+					const handlerResult = (await this.runEventHandler(() => handler(currentEvent, ctx))) as
+						| ToolResultEventResult
+						| undefined;
 					if (!handlerResult) continue;
 
 					if (handlerResult.content !== undefined) {

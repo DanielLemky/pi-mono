@@ -8,10 +8,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import {
+	createExtensionRuntime,
+	discoverAndLoadExtensions,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
+	ExtensionAPI,
 	ExtensionContextActions,
 	ExtensionUIContext,
 	ProviderConfig,
@@ -499,6 +506,120 @@ describe("ExtensionRunner", () => {
 			expect(runner.getCommand("shared-cmd:1")?.description).toBe("First command");
 			expect(runner.getCommand("shared-cmd:2")?.description).toBe("Second command");
 		});
+
+		it("invokes exact extension command names with fresh command contexts", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			let invokeCommand: ExtensionAPI["invokeCommand"] | undefined;
+			const calls: Array<{ command: string; args: string; context: object }> = [];
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					invokeCommand = pi.invokeCommand.bind(pi);
+					pi.registerCommand("shared", {
+						handler: async (args, ctx) => {
+							calls.push({ command: "first", args, context: ctx });
+						},
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"/extensions/first.ts",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerCommand("shared", {
+						handler: async (args, ctx) => {
+							calls.push({ command: "second", args, context: ctx });
+						},
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"/extensions/second.ts",
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(invokeCommand).toBeDefined();
+			await invokeCommand!("shared:1", "one");
+			await invokeCommand!("shared:2");
+
+			expect(calls.map(({ command, args }) => ({ command, args }))).toEqual([
+				{ command: "first", args: "one" },
+				{ command: "second", args: "" },
+			]);
+			expect(calls[0]?.context === calls[1]?.context).toBe(false);
+			await expect(runner.invokeCommand("shared")).rejects.toThrow("Unknown extension command: shared");
+		});
+
+		it("emits handler errors and rejects invocation", async () => {
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerCommand("explode", {
+						handler: async () => {
+							throw new Error("command exploded");
+						},
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"/extensions/explode.ts",
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			await expect(runner.invokeCommand("explode")).rejects.toThrow("command exploded");
+			expect(errors).toEqual([
+				{
+					extensionPath: "/extensions/explode.ts",
+					event: "command",
+					error: "command exploded",
+					stack: expect.any(String),
+				},
+			]);
+		});
+
+		it("rejects invocation during awaited event dispatch and from stale runtimes", async () => {
+			const runtime = createExtensionRuntime();
+			let invokeCommand: ExtensionAPI["invokeCommand"] | undefined;
+			let dispatchError: unknown;
+			let commandRuns = 0;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					invokeCommand = pi.invokeCommand.bind(pi);
+					pi.registerCommand("unsafe", {
+						handler: async () => {
+							commandRuns++;
+						},
+					});
+					pi.on("session_start", async () => {
+						try {
+							await pi.invokeCommand("unsafe");
+						} catch (error) {
+							dispatchError = error;
+						}
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"/extensions/unsafe.ts",
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+
+			await runner.emit({ type: "session_start", reason: "startup" });
+			expect(commandRuns).toBe(0);
+			expect(dispatchError).toBeInstanceOf(Error);
+			expect((dispatchError as Error).message).toContain("cannot run inside an awaited extension event handler");
+
+			runner.invalidate("stale test runtime");
+			expect(invokeCommand).toBeDefined();
+			await expect(invokeCommand!("unsafe")).rejects.toThrow("stale test runtime");
+		});
 	});
 
 	describe("context creation", () => {
@@ -931,7 +1052,7 @@ describe("ExtensionRunner", () => {
 			const errors: string[] = [];
 			runner.onError((error) => errors.push(error.error));
 
-			await runner.emit({ type: "session_start" });
+			await runner.emit({ type: "session_start", reason: "startup" });
 
 			expect(fork).not.toHaveBeenCalled();
 			expect(errors).toContain(
@@ -960,7 +1081,7 @@ describe("ExtensionRunner", () => {
 				reload,
 			});
 
-			await runner.emit({ type: "session_start" });
+			await runner.emit({ type: "session_start", reason: "startup" });
 			await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
 		});
 
@@ -985,7 +1106,7 @@ describe("ExtensionRunner", () => {
 				reload: async () => {},
 			});
 
-			await runner.emit({ type: "session_start" });
+			await runner.emit({ type: "session_start", reason: "startup" });
 			await vi.waitFor(() => expect(fork).toHaveBeenCalledWith("entry-later", undefined));
 		});
 

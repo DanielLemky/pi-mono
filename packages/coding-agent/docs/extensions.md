@@ -1546,6 +1546,28 @@ Use `sourceInfo` as the canonical provenance field. Do not infer ownership from 
 Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
 mode and would not execute if sent via `prompt`.
 
+### pi.invokeCommand(name, args?)
+
+Invoke a registered extension command from an out-of-band callback, such as a socket, timer, or remote-control bridge.
+Use the exact extension command `name` returned by `pi.getCommands()`, without a leading slash. Duplicate commands must
+use their resolved suffix (for example, `review:1` or `review:2`). Prompt templates, skills, and built-in commands are not
+invokable through this API.
+
+```typescript
+socket.on("message", async ({ command, args }) => {
+  await pi.invokeCommand(command, args);
+});
+```
+
+Each invocation receives a fresh `ExtensionCommandContext`, works whether Pi is idle or streaming, and defaults `args` to
+an empty string. The promise rejects when the command is unknown or its handler throws. Handler failures also emit an
+`extension_error` event through the host's normal extension error reporting.
+
+Do not call or await `pi.invokeCommand()` inside an awaited `pi.on(...)` event handler. Command handlers can replace the
+session, which would invalidate the dispatch frame waiting for that event handler, so the runner rejects this usage. Start
+the invocation from an out-of-band callback after event dispatch returns instead. Captured `pi` instances retain the normal
+stale-runtime guards and reject after session replacement or reload.
+
 ### pi.registerMessageRenderer(customType, renderer)
 
 Register a custom TUI renderer for custom messages with your `customType`. Custom messages are created with `pi.sendMessage()` and participate in LLM context. See [Custom UI](#custom-ui).

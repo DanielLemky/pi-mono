@@ -203,6 +203,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 				message ??
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
 		},
+		invokeCommand: () => Promise.reject(new Error("Extension runtime not initialized")),
 		reload: () => Promise.reject(new Error("Extension runtime not initialized")),
 		// Pre-bind: queue registrations so bindCore() can flush them once the
 		// model registry is available. bindCore() replaces both with direct calls.
@@ -310,6 +311,11 @@ function createExtensionAPI(
 		sendUserMessage(content, options): void {
 			runtime.assertActive();
 			runtime.sendUserMessage(content, options);
+		},
+
+		async invokeCommand(name: string, args?: string): Promise<void> {
+			runtime.assertActive();
+			await runtime.invokeCommand(name, args);
 		},
 
 		reload(): Promise<void> {

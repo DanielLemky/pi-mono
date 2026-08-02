@@ -1276,21 +1276,13 @@ export class AgentSession {
 		const command = this._extensionRunner.getCommand(commandName);
 		if (!command) return false;
 
-		// Get command context from extension runner (includes session control methods)
-		const ctx = this._extensionRunner.createCommandContext();
-
 		try {
-			await command.handler(args, ctx);
-			return true;
-		} catch (err) {
-			// Emit error via extension runner
-			this._extensionRunner.emitError({
-				extensionPath: `command:${commandName}`,
-				event: "command",
-				error: err instanceof Error ? err.message : String(err),
-			});
-			return true;
+			await this._extensionRunner.invokeCommand(commandName, args);
+		} catch {
+			// A found command is handled even when its handler fails. The authoritative
+			// runner has already emitted the extension error for the host to display.
 		}
+		return true;
 	}
 
 	/**

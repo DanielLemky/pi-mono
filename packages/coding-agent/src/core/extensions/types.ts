@@ -1306,6 +1306,12 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
+	/**
+	 * Invoke a registered extension command by its exact getCommands() name.
+	 * Intended for out-of-band callbacks; rejects during awaited extension event dispatch.
+	 */
+	invokeCommand(name: string, args?: string): Promise<void>;
+
 	/** Reload extensions, skills, prompts, themes, and context files. Treat this as terminal for the calling callback. */
 	reload(): Promise<void>;
 
@@ -1595,6 +1601,8 @@ export interface ExtensionRuntimeState {
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */
 	invalidate: (message?: string) => void;
+	/** Invoke an extension command from an out-of-band extension callback. Bound after extension loading. */
+	invokeCommand: (name: string, args?: string) => Promise<void>;
 	/** Reload resources from an out-of-band extension callback. Bound after extension loading. */
 	reload: () => Promise<void>;
 	/**

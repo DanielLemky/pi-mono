@@ -5,7 +5,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import type { InputEvent } from "../../src/core/extensions/index.ts";
+import type { ExtensionAPI, InputEvent } from "../../src/core/extensions/index.ts";
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { createTestResourceLoader } from "../utilities.ts";
@@ -246,6 +246,84 @@ describe("AgentSession prompt characterization", () => {
 		expect(commandRuns).toEqual(["hello world"]);
 		expect(harness.session.messages).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("treats a failing extension command prompt as handled", async () => {
+		const errors: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("explode", {
+						handler: async () => {
+							throw new Error("prompt command failed");
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({ onError: (error) => errors.push(error.error) });
+		harness.setResponses([fauxAssistantMessage("should stay queued")]);
+
+		await expect(harness.session.prompt("/explode")).resolves.toBeUndefined();
+
+		expect(errors).toContain("prompt command failed");
+		expect(harness.session.messages).toEqual([]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("allows pi.invokeCommand while the agent is streaming", async () => {
+		let invokeCommand: ExtensionAPI["invokeCommand"] | undefined;
+		let releaseToolExecution: (() => void) | undefined;
+		const toolRelease = new Promise<void>((resolve) => {
+			releaseToolExecution = resolve;
+		});
+		const commandRuns: Array<{ args: string; idle: boolean }> = [];
+		const waitTool: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait for release",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await toolRelease;
+				return { content: [{ type: "text", text: "released" }], details: {} };
+			},
+		};
+		const harness = await createHarness({
+			tools: [waitTool],
+			extensionFactories: [
+				(pi) => {
+					invokeCommand = pi.invokeCommand.bind(pi);
+					pi.registerCommand("remote", {
+						handler: async (args, ctx) => {
+							commandRuns.push({ args, idle: ctx.isIdle() });
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		const sawToolStart = new Promise<void>((resolve) => {
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "tool_execution_start") {
+					unsubscribe();
+					resolve();
+				}
+			});
+		});
+
+		const promptPromise = harness.session.prompt("start");
+		await sawToolStart;
+		expect(invokeCommand).toBeDefined();
+		await invokeCommand!("remote", "from callback");
+		expect(commandRuns).toEqual([{ args: "from callback", idle: false }]);
+
+		releaseToolExecution?.();
+		await promptPromise;
 	});
 
 	it("sendUserMessage while idle triggers a turn", async () => {

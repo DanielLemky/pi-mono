@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added `pi.invokeCommand(name, args?)` for out-of-band extension callbacks to invoke registered extension commands by their exact resolved names, including duplicate suffixes.
+
 ## [0.83.0] - 2026-07-29
 
 ### New Features
