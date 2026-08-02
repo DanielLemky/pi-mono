@@ -1306,6 +1306,9 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
+	/** Reload extensions, skills, prompts, themes, and context files. Treat this as terminal for the calling callback. */
+	reload(): Promise<void>;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1592,6 +1595,8 @@ export interface ExtensionRuntimeState {
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */
 	invalidate: (message?: string) => void;
+	/** Reload resources from an out-of-band extension callback. Bound after extension loading. */
+	reload: () => Promise<void>;
 	/**
 	 * Register or unregister a provider.
 	 *

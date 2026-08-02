@@ -939,6 +939,31 @@ describe("ExtensionRunner", () => {
 			);
 		});
 
+		it("allows pi.reload from an out-of-band extension callback", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "out-of-band-reload.ts"),
+				`export default function (pi) {
+					pi.on("session_start", () => {
+						setTimeout(() => void pi.reload(), 0);
+					});
+				}`,
+			);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const reload = vi.fn(async () => {});
+			runner.bindCommandContext({
+				waitForIdle: async () => {},
+				newSession: async () => ({ cancelled: false }),
+				fork: async () => ({ cancelled: false }),
+				navigateTree: async () => ({ cancelled: false }),
+				switchSession: async () => ({ cancelled: false }),
+				reload,
+			});
+
+			await runner.emit({ type: "session_start" });
+			await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+		});
+
 		it("allows fork from an event context after dispatch returns", async () => {
 			fs.writeFileSync(
 				path.join(extensionsDir, "out-of-band-fork.ts"),

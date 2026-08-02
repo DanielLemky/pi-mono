@@ -1299,39 +1299,24 @@ Important behavior:
 
 For predictable behavior, treat reload as terminal for that handler (`await ctx.reload(); return;`).
 
-Tools run with `ExtensionContext`, so they cannot call `ctx.reload()` directly. Use a command as the reload entrypoint, then expose a tool that queues that command as a follow-up user message.
-
-Example tool the LLM can call to trigger reload:
-
-```typescript
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-
-export default function (pi: ExtensionAPI) {
-  pi.registerCommand("reload-runtime", {
-    description: "Reload extensions, skills, prompts, themes, and context files",
-    handler: async (_args, ctx) => {
-      await ctx.reload();
-      return;
-    },
-  });
-
-  pi.registerTool({
-    name: "reload_runtime",
-    label: "Reload Runtime",
-    description: "Reload extensions, skills, prompts, themes, and context files",
-    parameters: Type.Object({}),
-    async execute() {
-      pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp" });
-      return {
-        content: [{ type: "text", text: "Queued /reload-runtime as a follow-up command." }],
-      };
-    },
-  });
-}
-```
+Out-of-band extension callbacks such as sockets and timers do not receive a command context. Use `pi.reload()` from those callbacks. Like `ctx.reload()`, it invalidates the current extension runtime, so treat the call as terminal and do not reuse captured extension state afterward.
 
 ## ExtensionAPI Methods
+
+### pi.reload()
+
+Run the same native resource reload flow as `/reload` from an out-of-band extension callback. This is useful for file watchers, local sockets, and remote-control bridges. If an agent turn is active, defer the call until the session reports idle.
+
+```typescript
+socket.on("message", async (message) => {
+  if (message === "reload" && sessionIsIdle()) {
+    await pi.reload();
+    return;
+  }
+});
+```
+
+Treat `await pi.reload()` as terminal for the callback. The current extension instance is stale after it resolves.
 
 ### pi.on(event, handler)
 
