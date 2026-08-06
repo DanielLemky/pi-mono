@@ -3,7 +3,13 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
+import type {
+	ImageContent,
+	Model,
+	OpenAICodexSubscriptionUsage,
+	Provider,
+	ProviderHeaders,
+} from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -283,6 +289,7 @@ export class ExtensionRunner {
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
+	private getSubscriptionUsageFn: () => OpenAICodexSubscriptionUsage | undefined = () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () => ({ cwd: this.cwd });
@@ -292,6 +299,7 @@ export class ExtensionRunner {
 	private switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
 	private reloadHandler: ReloadHandler = async () => {};
 	private shutdownHandler: ShutdownHandler = () => {};
+	private eventHandlerDepth = 0;
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
@@ -309,6 +317,10 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		this.runtime.invokeCommand = (name, args) => {
+			this.runtime.assertActive();
+			return this.invokeCommand(name, args);
+		};
 	}
 
 	bindCore(
@@ -346,6 +358,7 @@ export class ExtensionRunner {
 		this.hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
+		this.getSubscriptionUsageFn = contextActions.getSubscriptionUsage;
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 		this.getSystemPromptOptionsFn = contextActions.getSystemPromptOptions ?? (() => ({ cwd: this.cwd }));
@@ -419,6 +432,10 @@ export class ExtensionRunner {
 			this.navigateTreeHandler = actions.navigateTree;
 			this.switchSessionHandler = actions.switchSession;
 			this.reloadHandler = actions.reload;
+			this.runtime.reload = () => {
+				this.runtime.assertActive();
+				return this.reloadHandler();
+			};
 			return;
 		}
 
@@ -428,6 +445,7 @@ export class ExtensionRunner {
 		this.navigateTreeHandler = async () => ({ cancelled: false });
 		this.switchSessionHandler = async () => ({ cancelled: false });
 		this.reloadHandler = async () => {};
+		this.runtime.reload = async () => {};
 	}
 
 	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print"): void {
@@ -653,6 +671,34 @@ export class ExtensionRunner {
 		return this.resolveRegisteredCommands().find((command) => command.invocationName === name);
 	}
 
+	/** Invoke an extension command by its exact resolved invocation name. */
+	async invokeCommand(name: string, args = ""): Promise<void> {
+		this.assertActive();
+		if (this.eventHandlerDepth > 0) {
+			throw new Error(
+				"pi.invokeCommand() cannot run inside an awaited extension event handler; invoke it from an out-of-band callback after the handler returns",
+			);
+		}
+
+		const command = this.getCommand(name);
+		if (!command) {
+			throw new Error(`Unknown extension command: ${name}`);
+		}
+
+		const ctx = this.createCommandContext();
+		try {
+			await command.handler(args, ctx);
+		} catch (err) {
+			this.emitError({
+				extensionPath: command.sourceInfo.path,
+				event: "command",
+				error: err instanceof Error ? err.message : String(err),
+				stack: err instanceof Error ? err.stack : undefined,
+			});
+			throw err;
+		}
+	}
+
 	/**
 	 * Request a graceful shutdown. Called by extension tools and event handlers.
 	 * The actual shutdown behavior is provided by the mode via bindExtensions().
@@ -739,6 +785,10 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.getContextUsageFn();
 			},
+			getSubscriptionUsage: () => {
+				runner.assertActive();
+				return runner.getSubscriptionUsageFn();
+			},
 			compact: (options) => {
 				runner.assertActive();
 				runner.compactFn(options);
@@ -746,6 +796,15 @@ export class ExtensionRunner {
 			getSystemPrompt: () => {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
+			},
+			fork: (entryId, options) => {
+				runner.assertActive();
+				if (runner.eventHandlerDepth > 0) {
+					throw new Error(
+						"ctx.fork() cannot run inside an awaited extension event handler; request it from an out-of-band callback after the handler returns",
+					);
+				}
+				return runner.forkHandler(entryId, options);
 			},
 		};
 	}
@@ -770,10 +829,6 @@ export class ExtensionRunner {
 			this.assertActive();
 			return this.newSessionHandler(options);
 		};
-		context.fork = (entryId, options) => {
-			this.assertActive();
-			return this.forkHandler(entryId, options);
-		};
 		context.navigateTree = (targetId, options) => {
 			this.assertActive();
 			return this.navigateTreeHandler(targetId, options);
@@ -787,6 +842,15 @@ export class ExtensionRunner {
 			return this.reloadHandler();
 		};
 		return context;
+	}
+
+	private async runEventHandler<T>(handler: () => Promise<T> | T): Promise<T> {
+		this.eventHandlerDepth += 1;
+		try {
+			return await handler();
+		} finally {
+			this.eventHandlerDepth -= 1;
+		}
 	}
 
 	private isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
@@ -808,7 +872,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runEventHandler(() => handler(event, ctx));
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
@@ -844,7 +908,9 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
-					const handlerResult = (await handler(currentEvent, ctx)) as MessageEndEventResult | undefined;
+					const handlerResult = (await this.runEventHandler(() => handler(currentEvent, ctx))) as
+						| MessageEndEventResult
+						| undefined;
 					if (!handlerResult?.message) continue;
 
 					if (handlerResult.message.role !== currentMessage.role) {
@@ -885,7 +951,9 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
+					const handlerResult = (await this.runEventHandler(() => handler(currentEvent, ctx))) as
+						| ToolResultEventResult
+						| undefined;
 					if (!handlerResult) continue;
 
 					if (handlerResult.content !== undefined) {
@@ -938,7 +1006,7 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await handler(event, ctx);
+				const handlerResult = await this.runEventHandler(() => handler(event, ctx));
 
 				if (handlerResult) {
 					result = handlerResult as ToolCallEventResult;
@@ -961,7 +1029,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runEventHandler(() => handler(event, ctx));
 					if (handlerResult) {
 						return handlerResult as UserBashEventResult;
 					}
@@ -992,7 +1060,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const event: ContextEvent = { type: "context", messages: currentMessages };
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runEventHandler(() => handler(event, ctx));
 
 					if (handlerResult && (handlerResult as ContextEventResult).messages) {
 						currentMessages = (handlerResult as ContextEventResult).messages!;
@@ -1027,7 +1095,7 @@ export class ExtensionRunner {
 						type: "before_provider_request",
 						payload: currentPayload,
 					};
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runEventHandler(() => handler(event, ctx));
 					if (handlerResult !== undefined) {
 						currentPayload = handlerResult;
 					}
@@ -1061,7 +1129,7 @@ export class ExtensionRunner {
 						type: "before_provider_headers",
 						headers,
 					};
-					await handler(event, ctx);
+					await this.runEventHandler(() => handler(event, ctx));
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
@@ -1109,7 +1177,7 @@ export class ExtensionRunner {
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
 					};
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runEventHandler(() => handler(event, ctx));
 
 					if (handlerResult) {
 						const result = handlerResult as BeforeAgentStartEventResult;
@@ -1164,7 +1232,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.runEventHandler(() => handler(event, ctx));
 					const result = handlerResult as ResourcesDiscoverResult | undefined;
 
 					if (result?.skillPaths?.length) {
@@ -1213,7 +1281,7 @@ export class ExtensionRunner {
 						source,
 						streamingBehavior,
 					};
-					const result = (await handler(event, ctx)) as InputEventResult | undefined;
+					const result = (await this.runEventHandler(() => handler(event, ctx))) as InputEventResult | undefined;
 					if (result?.action === "handled") return result;
 					if (result?.action === "transform") {
 						currentText = result.text;

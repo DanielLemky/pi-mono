@@ -25,6 +25,7 @@ import type {
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
+	OpenAICodexSubscriptionUsage,
 	Provider,
 	ProviderHeaders,
 	RefreshModelsContext,
@@ -340,10 +341,24 @@ export interface ExtensionContext {
 	shutdown(): void;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
+	/** Get the latest provider-reported subscription usage for this in-memory session. */
+	getSubscriptionUsage(): OpenAICodexSubscriptionUsage | undefined;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+
+	/**
+	 * Fork from a specific entry using the host's native session replacement flow.
+	 * Event handlers may retain their current context for an out-of-band callback
+	 * and call this after awaited event dispatch has returned. Calling it from
+	 * inside an awaited event handler is rejected to prevent replacement deadlocks.
+	 * The host remains authoritative for runtime teardown/rebind and editor state.
+	 */
+	fork(
+		entryId: string,
+		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+	): Promise<{ cancelled: boolean }>;
 }
 
 /**
@@ -363,12 +378,6 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }>;
-
-	/** Fork from a specific entry, creating a new session file. */
-	fork(
-		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean }>;
 
 	/** Navigate to a different point in the session tree. */
 	navigateTree(
@@ -392,6 +401,9 @@ export interface ExtensionCommandContext extends ExtensionContext {
  * This is passed to `withSession()` callbacks on `newSession()`, `fork()`, and `switchSession()`.
  */
 export interface ReplacedSessionContext extends ExtensionCommandContext {
+	/** Set the replacement session's display name. */
+	setSessionName(name: string): void;
+
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
@@ -1313,6 +1325,15 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
+	/**
+	 * Invoke a registered extension command by its exact getCommands() name.
+	 * Intended for out-of-band callbacks; rejects during awaited extension event dispatch.
+	 */
+	invokeCommand(name: string, args?: string): Promise<void>;
+
+	/** Reload extensions, skills, prompts, themes, and context files. Treat this as terminal for the calling callback. */
+	reload(): Promise<void>;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1608,6 +1629,10 @@ export interface ExtensionRuntimeState {
 	invalidate: (message?: string) => void;
 	/** Retain an event-bus subscription until this runtime is invalidated. */
 	trackEventBusSubscription: (unsubscribe: () => void) => () => void;
+	/** Invoke an extension command from an out-of-band extension callback. Bound after extension loading. */
+	invokeCommand: (name: string, args?: string) => Promise<void>;
+	/** Reload resources from an out-of-band extension callback. Bound after extension loading. */
+	reload: () => Promise<void>;
 	/**
 	 * Register or unregister a provider.
 	 *
@@ -1654,6 +1679,7 @@ export interface ExtensionContextActions {
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
+	getSubscriptionUsage: () => OpenAICodexSubscriptionUsage | undefined;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;

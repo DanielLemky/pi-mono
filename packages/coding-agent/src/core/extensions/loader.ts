@@ -222,6 +222,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 			eventBusUnsubscribers.add(trackedUnsubscribe);
 			return trackedUnsubscribe;
 		},
+		invokeCommand: () => Promise.reject(new Error("Extension runtime not initialized")),
+		reload: () => Promise.reject(new Error("Extension runtime not initialized")),
 		// Pre-bind: queue registrations so bindCore() can flush them once the
 		// model registry is available. bindCore() replaces both with direct calls.
 		registerProvider: (name, config, extensionPath = "<unknown>") => {
@@ -333,6 +335,16 @@ function createExtensionAPI(
 		sendUserMessage(content, options): void {
 			runtime.assertActive();
 			runtime.sendUserMessage(content, options);
+		},
+
+		async invokeCommand(name: string, args?: string): Promise<void> {
+			runtime.assertActive();
+			await runtime.invokeCommand(name, args);
+		},
+
+		reload(): Promise<void> {
+			runtime.assertActive();
+			return runtime.reload();
 		},
 
 		appendEntry(customType: string, data?: unknown): void {

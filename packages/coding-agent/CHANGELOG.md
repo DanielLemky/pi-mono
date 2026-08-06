@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pi.invokeCommand(name, args?)` for out-of-band extension callbacks to invoke registered extension commands by their exact resolved names, including duplicate suffixes.
+
 ## [0.84.0] - 2026-08-06
 
 ### New Features
@@ -198,6 +202,7 @@
 - Fixed inherited phantom fullscreen text selection from unmatched mouse events when changing terminal pane focus.
 - Fixed inherited keyboard input rendering latency on Windows by letting input preempt the throttled render timer.
 - Fixed inherited agent harness path handling on Windows for file basenames, recursive skill loading, and prompt template names.
+
 
 ## [0.83.0] - 2026-07-29
 

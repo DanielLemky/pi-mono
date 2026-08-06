@@ -28,6 +28,7 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
+	OpenAICodexSubscriptionUsage,
 	ProviderEnv,
 	ProviderHeaders,
 	SimpleStreamOptions,
@@ -662,12 +663,20 @@ async function processStream(
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
-	await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal)), output, stream, model, {
-		serviceTier: options?.serviceTier,
-		grammarToolInputProperties,
-		resolveServiceTier: resolveCodexServiceTier,
-		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
-	});
+	await processResponsesStream(
+		mapCodexEvents(parseSSE(response, options?.signal), (usage) => {
+			stream.push({ type: "subscription_usage", usage, partial: output });
+		}),
+		output,
+		stream,
+		model,
+		{
+			serviceTier: options?.serviceTier,
+			grammarToolInputProperties,
+			resolveServiceTier: resolveCodexServiceTier,
+			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+		},
+	);
 }
 
 class CodexApiError extends Error {
@@ -719,10 +728,101 @@ function extractCodexEventError(event: Record<string, unknown>): { code?: string
 	};
 }
 
-async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
+function optionalBoolean(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function optionalDisplayText(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const text = value
+		.replace(/[\u0000-\u001f\u007f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return text ? text.slice(0, 500) : undefined;
+}
+
+function optionalTimestamp(value: unknown): number | undefined {
+	const numeric = optionalNumber(value);
+	if (numeric !== undefined) return numeric;
+	if (typeof value !== "string") return undefined;
+	const milliseconds = Date.parse(value);
+	return Number.isFinite(milliseconds) ? Math.floor(milliseconds / 1000) : undefined;
+}
+
+function parsePromo(value: unknown): OpenAICodexSubscriptionUsage["promo"] {
+	const directMessage = optionalDisplayText(value);
+	if (directMessage) return { message: directMessage };
+	if (!value || typeof value !== "object") return undefined;
+	const promo = value as Record<string, unknown>;
+	if (promo.active === false || promo.enabled === false) return undefined;
+	const title = optionalDisplayText(promo.title);
+	const message = optionalDisplayText(promo.message) ?? optionalDisplayText(promo.description);
+	const multiplier = optionalNumber(promo.multiplier);
+	const expiresAt =
+		optionalTimestamp(promo.expires_at) ?? optionalTimestamp(promo.ends_at) ?? optionalTimestamp(promo.end_at);
+	if (!title && !message && (multiplier === undefined || multiplier <= 1)) return undefined;
+	return {
+		title,
+		message,
+		multiplier: multiplier !== undefined && multiplier > 1 ? multiplier : undefined,
+		expiresAt,
+	};
+}
+
+function parseRateLimitWindow(value: unknown): OpenAICodexSubscriptionUsage["primary"] {
+	if (!value || typeof value !== "object") return undefined;
+	const window = value as Record<string, unknown>;
+	const usedPercent = optionalNumber(window.used_percent);
+	if (usedPercent === undefined) return undefined;
+	return {
+		usedPercent,
+		windowMinutes: optionalNumber(window.window_minutes),
+		resetAfterSeconds: optionalNumber(window.reset_after_seconds),
+		resetAt: optionalNumber(window.reset_at),
+	};
+}
+
+function parseCodexRateLimits(event: Record<string, unknown>): OpenAICodexSubscriptionUsage {
+	const rateLimits =
+		event.rate_limits && typeof event.rate_limits === "object"
+			? (event.rate_limits as Record<string, unknown>)
+			: undefined;
+	const credits =
+		event.credits && typeof event.credits === "object" ? (event.credits as Record<string, unknown>) : undefined;
+	return {
+		provider: "openai-codex",
+		planType: typeof event.plan_type === "string" ? event.plan_type : undefined,
+		allowed: optionalBoolean(rateLimits?.allowed),
+		limitReached: optionalBoolean(rateLimits?.limit_reached),
+		primary: parseRateLimitWindow(rateLimits?.primary),
+		secondary: parseRateLimitWindow(rateLimits?.secondary),
+		credits: credits
+			? {
+					hasCredits: optionalBoolean(credits.has_credits),
+					unlimited: optionalBoolean(credits.unlimited),
+					balance: typeof credits.balance === "string" ? credits.balance : undefined,
+				}
+			: undefined,
+		promo: parsePromo(event.promo),
+	};
+}
+
+async function* mapCodexEvents(
+	events: AsyncIterable<Record<string, unknown>>,
+	onSubscriptionUsage?: (usage: OpenAICodexSubscriptionUsage) => void,
+): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
+
+		if (type === "codex.rate_limits") {
+			onSubscriptionUsage?.(parseCodexRateLimits(event));
+			continue;
+		}
 
 		if (type === "error") {
 			const { code, message } = extractCodexEventError(event);
@@ -1504,7 +1604,10 @@ async function processWebSocketStream(
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
-				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs)),
+				mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs), (usage) => {
+					onStart();
+					stream.push({ type: "subscription_usage", usage, partial: output });
+				}),
 				onStart,
 			),
 			output,

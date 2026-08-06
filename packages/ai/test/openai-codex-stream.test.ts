@@ -11,7 +11,7 @@ import {
 	stream as streamOpenAICodexResponses,
 	streamSimple as streamSimpleOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { AssistantMessageEvent, Context, Model } from "../src/types.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
@@ -44,6 +44,33 @@ function decodeCodexRequestBody(body: RequestInit["body"] | undefined): Record<s
 		return JSON.parse(Buffer.from(zstdDecompressSync(body)).toString("utf8")) as Record<string, unknown>;
 	}
 	return null;
+}
+
+function buildRateLimitsEvent() {
+	return {
+		type: "codex.rate_limits",
+		plan_type: "plus",
+		rate_limits: {
+			allowed: true,
+			limit_reached: false,
+			primary: {
+				used_percent: 7,
+				window_minutes: 300,
+				reset_after_seconds: 120,
+				reset_at: 1785269351,
+			},
+			secondary: { used_percent: 23, window_minutes: 10080, reset_after_seconds: 556112 },
+		},
+		credits: { has_credits: false, unlimited: false, balance: "0" },
+		promo: {
+			active: true,
+			title: "  Double limits  ",
+			description: "Twice the included Codex usage during the promotion.",
+			multiplier: 2,
+			expires_at: "2026-08-11T16:20:00.000Z",
+			campaign_id: "sensitive-internal-id",
+		},
+	};
 }
 
 function buildSSEPayload({
@@ -203,6 +230,117 @@ describe("openai-codex streaming", () => {
 
 		expect(sawTextDelta).toBe(true);
 		expect(sawDone).toBe(true);
+	});
+
+	it("propagates codex.rate_limits from SSE", async () => {
+		const token = mockToken();
+		const encoder = new TextEncoder();
+		const sse = `data: ${JSON.stringify(buildRateLimitsEvent())}\n\n${buildSSEPayload({ status: "completed" })}`;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								controller.enqueue(encoder.encode(sse));
+								controller.close();
+							},
+						}),
+						{ status: 200, headers: { "content-type": "text/event-stream" } },
+					),
+			),
+		);
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const events: AssistantMessageEvent[] = [];
+		const result = streamOpenAICodexResponses(model, { messages: [] }, { apiKey: token, transport: "sse" });
+		for await (const event of result) events.push(event);
+
+		expect(events.map((event) => event.type).slice(0, 2)).toEqual(["start", "subscription_usage"]);
+		const usageEvent = events.find((event) => event.type === "subscription_usage");
+		expect(usageEvent?.type === "subscription_usage" ? usageEvent.usage : undefined).toEqual({
+			provider: "openai-codex",
+			planType: "plus",
+			allowed: true,
+			limitReached: false,
+			primary: { usedPercent: 7, windowMinutes: 300, resetAfterSeconds: 120, resetAt: 1785269351 },
+			secondary: { usedPercent: 23, windowMinutes: 10080, resetAfterSeconds: 556112, resetAt: undefined },
+			credits: { hasCredits: false, unlimited: false, balance: "0" },
+			promo: {
+				title: "Double limits",
+				message: "Twice the included Codex usage during the promotion.",
+				multiplier: 2,
+				expiresAt: 1786465200,
+			},
+		});
+		expect((await result.result()).stopReason).toBe("stop");
+	});
+
+	it("propagates first-message codex.rate_limits from websocket after start", async () => {
+		const token = mockToken();
+		class MockWebSocket extends EventTarget {
+			constructor() {
+				super();
+				queueMicrotask(() => this.dispatchEvent(new Event("open")));
+			}
+			send(): void {
+				queueMicrotask(() => {
+					for (const event of [
+						buildRateLimitsEvent(),
+						{
+							type: "response.completed",
+							response: {
+								id: "resp_1",
+								status: "completed",
+								usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+							},
+						},
+					]) {
+						this.dispatchEvent(Object.assign(new Event("message"), { data: JSON.stringify(event) }));
+					}
+				});
+			}
+			close(): void {}
+		}
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		vi.stubGlobal("fetch", vi.fn());
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const events: AssistantMessageEvent[] = [];
+		const result = streamOpenAICodexResponses(model, { messages: [] }, { apiKey: token, transport: "websocket" });
+		for await (const event of result) events.push(event);
+
+		expect(events.map((event) => event.type)).toEqual(["start", "subscription_usage", "done"]);
+		expect(events.filter((event) => event.type === "start")).toHaveLength(1);
+		const usageEvent = events.find((event) => event.type === "subscription_usage");
+		expect(usageEvent?.type === "subscription_usage" ? usageEvent.usage.promo : undefined).toEqual({
+			title: "Double limits",
+			message: "Twice the included Codex usage during the promotion.",
+			multiplier: 2,
+			expiresAt: 1786465200,
+		});
+		expect(global.fetch).not.toHaveBeenCalled();
 	});
 
 	it("completes after response.completed even when the SSE body stays open", async () => {

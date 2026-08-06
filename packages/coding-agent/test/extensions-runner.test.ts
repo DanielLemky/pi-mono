@@ -8,10 +8,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import {
+	createExtensionRuntime,
+	discoverAndLoadExtensions,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
+	ExtensionAPI,
 	ExtensionContextActions,
 	ExtensionUIContext,
 	ProviderConfig,
@@ -97,10 +104,28 @@ describe("ExtensionRunner", () => {
 		hasPendingMessages: () => false,
 		shutdown: () => {},
 		getContextUsage: () => undefined,
+		getSubscriptionUsage: () => undefined,
 		compact: () => {},
 		getSystemPrompt: () => "",
 		getScopedModels: () => [],
 	};
+
+	describe("subscription usage", () => {
+		it("exposes the latest subscription usage through ExtensionContext", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const usage = {
+				provider: "openai-codex" as const,
+				planType: "plus",
+				primary: { usedPercent: 7, windowMinutes: 300 },
+				promo: { message: "Twice the usage", multiplier: 2 },
+			};
+			runner.bindCore(extensionActions, { ...extensionContextActions, getSubscriptionUsage: () => usage });
+
+			expect(runner.createContext().getSubscriptionUsage()).toEqual(usage);
+			expect(runner.createCommandContext().getSubscriptionUsage()).toEqual(usage);
+		});
+	});
 
 	describe("scopedModels", () => {
 		it("reflects the getScopedModels context action on ctx.scopedModels", async () => {
@@ -497,6 +522,120 @@ describe("ExtensionRunner", () => {
 			expect(diagnostics).toEqual([]);
 			expect(runner.getCommand("shared-cmd:1")?.description).toBe("First command");
 			expect(runner.getCommand("shared-cmd:2")?.description).toBe("Second command");
+		});
+
+		it("invokes exact extension command names with fresh command contexts", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			let invokeCommand: ExtensionAPI["invokeCommand"] | undefined;
+			const calls: Array<{ command: string; args: string; context: object }> = [];
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					invokeCommand = pi.invokeCommand.bind(pi);
+					pi.registerCommand("shared", {
+						handler: async (args, ctx) => {
+							calls.push({ command: "first", args, context: ctx });
+						},
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"/extensions/first.ts",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerCommand("shared", {
+						handler: async (args, ctx) => {
+							calls.push({ command: "second", args, context: ctx });
+						},
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"/extensions/second.ts",
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(invokeCommand).toBeDefined();
+			await invokeCommand!("shared:1", "one");
+			await invokeCommand!("shared:2");
+
+			expect(calls.map(({ command, args }) => ({ command, args }))).toEqual([
+				{ command: "first", args: "one" },
+				{ command: "second", args: "" },
+			]);
+			expect(calls[0]?.context === calls[1]?.context).toBe(false);
+			await expect(runner.invokeCommand("shared")).rejects.toThrow("Unknown extension command: shared");
+		});
+
+		it("emits handler errors and rejects invocation", async () => {
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerCommand("explode", {
+						handler: async () => {
+							throw new Error("command exploded");
+						},
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"/extensions/explode.ts",
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			await expect(runner.invokeCommand("explode")).rejects.toThrow("command exploded");
+			expect(errors).toEqual([
+				{
+					extensionPath: "/extensions/explode.ts",
+					event: "command",
+					error: "command exploded",
+					stack: expect.any(String),
+				},
+			]);
+		});
+
+		it("rejects invocation during awaited event dispatch and from stale runtimes", async () => {
+			const runtime = createExtensionRuntime();
+			let invokeCommand: ExtensionAPI["invokeCommand"] | undefined;
+			let dispatchError: unknown;
+			let commandRuns = 0;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					invokeCommand = pi.invokeCommand.bind(pi);
+					pi.registerCommand("unsafe", {
+						handler: async () => {
+							commandRuns++;
+						},
+					});
+					pi.on("session_start", async () => {
+						try {
+							await pi.invokeCommand("unsafe");
+						} catch (error) {
+							dispatchError = error;
+						}
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"/extensions/unsafe.ts",
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+
+			await runner.emit({ type: "session_start", reason: "startup" });
+			expect(commandRuns).toBe(0);
+			expect(dispatchError).toBeInstanceOf(Error);
+			expect((dispatchError as Error).message).toContain("cannot run inside an awaited extension event handler");
+
+			runner.invalidate("stale test runtime");
+			expect(invokeCommand).toBeDefined();
+			await expect(invokeCommand!("unsafe")).rejects.toThrow("stale test runtime");
 		});
 	});
 
@@ -921,8 +1060,89 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("command context", () => {
-		it("passes fork options through to the bound handler", async () => {
+	describe("session replacement context", () => {
+		it("rejects fork from awaited event dispatch instead of entering replacement", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "unsafe-fork.ts"),
+				`export default function (pi) {
+					pi.on("session_start", async (_event, ctx) => {
+						await ctx.fork("entry-unsafe");
+					});
+				}`,
+			);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const fork = vi.fn(async () => ({ cancelled: false }));
+			runner.bindCommandContext({
+				waitForIdle: async () => {},
+				newSession: async () => ({ cancelled: false }),
+				fork,
+				navigateTree: async () => ({ cancelled: false }),
+				switchSession: async () => ({ cancelled: false }),
+				reload: async () => {},
+			});
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(error.error));
+
+			await runner.emit({ type: "session_start", reason: "startup" });
+
+			expect(fork).not.toHaveBeenCalled();
+			expect(errors).toContain(
+				"ctx.fork() cannot run inside an awaited extension event handler; request it from an out-of-band callback after the handler returns",
+			);
+		});
+
+		it("allows pi.reload from an out-of-band extension callback", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "out-of-band-reload.ts"),
+				`export default function (pi) {
+					pi.on("session_start", () => {
+						setTimeout(() => void pi.reload(), 0);
+					});
+				}`,
+			);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const reload = vi.fn(async () => {});
+			runner.bindCommandContext({
+				waitForIdle: async () => {},
+				newSession: async () => ({ cancelled: false }),
+				fork: async () => ({ cancelled: false }),
+				navigateTree: async () => ({ cancelled: false }),
+				switchSession: async () => ({ cancelled: false }),
+				reload,
+			});
+
+			await runner.emit({ type: "session_start", reason: "startup" });
+			await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+		});
+
+		it("allows fork from an event context after dispatch returns", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "out-of-band-fork.ts"),
+				`export default function (pi) {
+					pi.on("session_start", (_event, ctx) => {
+						setTimeout(() => void ctx.fork("entry-later"), 0);
+					});
+				}`,
+			);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const fork = vi.fn(async () => ({ cancelled: false }));
+			runner.bindCommandContext({
+				waitForIdle: async () => {},
+				newSession: async () => ({ cancelled: false }),
+				fork,
+				navigateTree: async () => ({ cancelled: false }),
+				switchSession: async () => ({ cancelled: false }),
+				reload: async () => {},
+			});
+
+			await runner.emit({ type: "session_start", reason: "startup" });
+			await vi.waitFor(() => expect(fork).toHaveBeenCalledWith("entry-later", undefined));
+		});
+
+		it("passes fork options from an out-of-band context and command context through to the bound handler", async () => {
 			const runtime = createExtensionRuntime();
 			const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
 			const fork = vi.fn(async () => ({ cancelled: false }));
@@ -936,10 +1156,11 @@ describe("ExtensionRunner", () => {
 				reload: async () => {},
 			});
 
-			const commandContext = runner.createCommandContext();
-			await commandContext.fork("entry-1");
+			const eventContext = runner.createContext();
+			await eventContext.fork("entry-1");
 			expect(fork).toHaveBeenCalledWith("entry-1", undefined);
 
+			const commandContext = runner.createCommandContext();
 			await commandContext.fork("entry-2", { position: "at" });
 			expect(fork).toHaveBeenLastCalledWith("entry-2", { position: "at" });
 		});

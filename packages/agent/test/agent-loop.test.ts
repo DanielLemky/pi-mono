@@ -163,6 +163,38 @@ describe("agentLoop with AgentMessage", () => {
 		expect(eventTypes).toContain("agent_end");
 	});
 
+	it("propagates subscription usage as a message update", async () => {
+		const usage = {
+			provider: "openai-codex" as const,
+			planType: "plus",
+			primary: { usedPercent: 7, windowMinutes: 300 },
+		};
+		const stream = agentLoop(
+			[createUserMessage("Hello")],
+			{ systemPrompt: "", messages: [], tools: [] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			() => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage([]);
+					response.push({ type: "start", partial: message });
+					response.push({ type: "subscription_usage", usage, partial: message });
+					response.push({ type: "done", reason: "stop", message });
+				});
+				return response;
+			},
+		);
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+		const update = events.find(
+			(event): event is Extract<AgentEvent, { type: "message_update" }> =>
+				event.type === "message_update" && event.assistantMessageEvent.type === "subscription_usage",
+		);
+		expect(update?.assistantMessageEvent).toMatchObject({ type: "subscription_usage", usage });
+	});
+
 	it("should handle custom message types via convertToLlm", async () => {
 		// Create a custom message type
 		interface CustomNotification {

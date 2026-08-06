@@ -365,6 +365,35 @@ export interface ToolCall {
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 }
 
+export interface SubscriptionRateLimitWindow {
+	usedPercent: number;
+	windowMinutes?: number;
+	resetAfterSeconds?: number;
+	resetAt?: number;
+}
+
+export interface OpenAICodexSubscriptionPromo {
+	title?: string;
+	message?: string;
+	multiplier?: number;
+	expiresAt?: number;
+}
+
+export interface OpenAICodexSubscriptionUsage {
+	provider: "openai-codex";
+	planType?: string;
+	allowed?: boolean;
+	limitReached?: boolean;
+	primary?: SubscriptionRateLimitWindow;
+	secondary?: SubscriptionRateLimitWindow;
+	credits?: {
+		hasCredits?: boolean;
+		unlimited?: boolean;
+		balance?: string;
+	};
+	promo?: OpenAICodexSubscriptionPromo;
+}
+
 export interface Usage {
 	input: number;
 	output: number;
@@ -524,6 +553,7 @@ export type AssistantMessageEvent =
 	| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
 	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
+	| { type: "subscription_usage"; usage: OpenAICodexSubscriptionUsage; partial: AssistantMessage }
 	| {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse" | "deferred">;

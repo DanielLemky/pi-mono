@@ -1081,7 +1081,7 @@ pi.on("before_agent_start", (event, ctx) => {
 
 ## ExtensionCommandContext
 
-Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with session control methods. These are only available in commands because they can deadlock if called from event handlers.
+Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with additional session control methods. `ctx.newSession()`, `ctx.switchSession()`, and tree navigation remain command-only. `ctx.fork()` is also present on the base `ExtensionContext` for active, out-of-band callbacks that run after awaited extension event dispatch has returned.
 
 ### ctx.getSystemPromptOptions()
 
@@ -1144,7 +1144,9 @@ Options:
 
 ### ctx.fork(entryId, options?)
 
-Fork from a specific entry, creating a new session file:
+Fork from a specific entry using the host's native session replacement lifecycle. In addition to command handlers, an extension may retain its active `ExtensionContext` and call `fork()` later from an out-of-band callback, such as a socket or timer callback after the event handler has returned.
+
+Do not call or await `ctx.fork()` inside an awaited `pi.on(...)` event handler. Session replacement can invalidate the dispatch frame that is waiting for the handler, so the runner rejects that call with a clear error instead of allowing a deadlock. The retained context must still be active; normal stale-context guards apply after replacement or reload.
 
 ```typescript
 const result = await ctx.fork("entry-id-123", {
@@ -1232,12 +1234,13 @@ pi.registerCommand("switch", {
 
 ### Session replacement lifecycle and footguns
 
-`withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with async `sendMessage()` and `sendUserMessage()` helpers bound to the replacement session.
+`withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with `setSessionName()` plus async `sendMessage()` and `sendUserMessage()` helpers bound to the replacement session.
 
 Lifecycle and footguns:
 - `withSession` runs only after the old session has emitted `session_shutdown`, the old runtime has been torn down, the replacement session has been rebound, and the new extension instance has already received `session_start`.
 - The callback still executes in the original closure, not inside the new extension instance. That means your old extension instance may already have run its shutdown cleanup before `withSession` starts.
 - Captured old `pi` / old command `ctx` session-bound objects are stale after replacement and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
+- Use `ctx.setSessionName(name)` inside `withSession` when only the replacement session should receive a new display name.
 - Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before replacement, `sm` is still the old `SessionManager` object. Do not reuse it after replacement.
 - Code in `withSession` should assume any state invalidated by your `session_shutdown` handler is already gone. Only capture plain data that survives shutdown cleanly, such as strings, ids, and serialized config.
 
@@ -1297,39 +1300,24 @@ Important behavior:
 
 For predictable behavior, treat reload as terminal for that handler (`await ctx.reload(); return;`).
 
-Tools run with `ExtensionContext`, so they cannot call `ctx.reload()` directly. Use a command as the reload entrypoint, then expose a tool that queues that command as a follow-up user message.
-
-Example tool the LLM can call to trigger reload:
-
-```typescript
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-
-export default function (pi: ExtensionAPI) {
-  pi.registerCommand("reload-runtime", {
-    description: "Reload extensions, skills, prompts, themes, and context files",
-    handler: async (_args, ctx) => {
-      await ctx.reload();
-      return;
-    },
-  });
-
-  pi.registerTool({
-    name: "reload_runtime",
-    label: "Reload Runtime",
-    description: "Reload extensions, skills, prompts, themes, and context files",
-    parameters: Type.Object({}),
-    async execute() {
-      pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp" });
-      return {
-        content: [{ type: "text", text: "Queued /reload-runtime as a follow-up command." }],
-      };
-    },
-  });
-}
-```
+Out-of-band extension callbacks such as sockets and timers do not receive a command context. Use `pi.reload()` from those callbacks. Like `ctx.reload()`, it invalidates the current extension runtime, so treat the call as terminal and do not reuse captured extension state afterward.
 
 ## ExtensionAPI Methods
+
+### pi.reload()
+
+Run the same native resource reload flow as `/reload` from an out-of-band extension callback. This is useful for file watchers, local sockets, and remote-control bridges. If an agent turn is active, defer the call until the session reports idle.
+
+```typescript
+socket.on("message", async (message) => {
+  if (message === "reload" && sessionIsIdle()) {
+    await pi.reload();
+    return;
+  }
+});
+```
+
+Treat `await pi.reload()` as terminal for the callback. The current extension instance is stale after it resolves.
 
 ### pi.on(event, handler)
 
@@ -1558,6 +1546,28 @@ Use `sourceInfo` as the canonical provenance field. Do not infer ownership from 
 
 Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
 mode and would not execute if sent via `prompt`.
+
+### pi.invokeCommand(name, args?)
+
+Invoke a registered extension command from an out-of-band callback, such as a socket, timer, or remote-control bridge.
+Use the exact extension command `name` returned by `pi.getCommands()`, without a leading slash. Duplicate commands must
+use their resolved suffix (for example, `review:1` or `review:2`). Prompt templates, skills, and built-in commands are not
+invokable through this API.
+
+```typescript
+socket.on("message", async ({ command, args }) => {
+  await pi.invokeCommand(command, args);
+});
+```
+
+Each invocation receives a fresh `ExtensionCommandContext`, works whether Pi is idle or streaming, and defaults `args` to
+an empty string. The promise rejects when the command is unknown or its handler throws. Handler failures also emit an
+`extension_error` event through the host's normal extension error reporting.
+
+Do not call or await `pi.invokeCommand()` inside an awaited `pi.on(...)` event handler. Command handlers can replace the
+session, which would invalidate the dispatch frame waiting for that event handler, so the runner rejects this usage. Start
+the invocation from an out-of-band callback after event dispatch returns instead. Captured `pi` instances retain the normal
+stale-runtime guards and reject after session replacement or reload.
 
 ### pi.registerMessageRenderer(customType, renderer)
 

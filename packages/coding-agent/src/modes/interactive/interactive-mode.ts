@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import type { AuthEvent, AuthPrompt, SubscriptionRateLimitWindow } from "@earendil-works/pi-ai";
 import type { AssistantMessage, ImageContent, Message, Model } from "@earendil-works/pi-ai/compat";
 import type {
 	AutocompleteItem,
@@ -1988,6 +1988,7 @@ export class InteractiveMode {
 				this.shutdownRequested = true;
 			},
 			getContextUsage: () => this.session.getContextUsage(),
+			getSubscriptionUsage: () => this.session.getSubscriptionUsage(),
 			compact: (options) => {
 				void (async () => {
 					try {
@@ -2000,6 +2001,11 @@ export class InteractiveMode {
 				})();
 			},
 			getSystemPrompt: () => this.session.systemPrompt,
+			fork: async (entryId, options) => {
+				const result = await this.runtimeHost.fork(entryId, options);
+				if (!result.cancelled) this.editor.setText(result.selectedText ?? "");
+				return { cancelled: result.cancelled };
+			},
 		});
 
 		// Set up the extension shortcut handler on the default editor
@@ -2885,6 +2891,11 @@ export class InteractiveMode {
 			}
 			if (text === "/session") {
 				this.handleSessionCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/usage") {
+				this.handleUsageCommand();
 				this.editor.setText("");
 				return;
 			}
@@ -6018,6 +6029,81 @@ export class InteractiveMode {
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
+		this.ui.requestRender();
+	}
+
+	private formatUsageReset(timestamp: number): string {
+		const reset = new Date(timestamp * 1000);
+		const options: Intl.DateTimeFormatOptions = {
+			weekday: "long",
+			month: "long",
+			day: "numeric",
+			hour: "numeric",
+			minute: "2-digit",
+		};
+		if (reset.getFullYear() !== new Date().getFullYear()) options.year = "numeric";
+		return new Intl.DateTimeFormat(undefined, options).format(reset);
+	}
+
+	private formatUsageWindow(window: SubscriptionRateLimitWindow, kind: "primary" | "secondary"): string {
+		let label = kind === "primary" ? "Primary allowance" : "Secondary allowance";
+		if (window.windowMinutes === 7 * 24 * 60) {
+			label = "Weekly allowance";
+		} else if (window.windowMinutes !== undefined) {
+			if (window.windowMinutes % (24 * 60) === 0) {
+				const days = window.windowMinutes / (24 * 60);
+				label = `${days}-day allowance`;
+			} else if (window.windowMinutes % 60 === 0) {
+				label = `${window.windowMinutes / 60}-hour allowance`;
+			} else {
+				label = `${window.windowMinutes}-minute allowance`;
+			}
+		}
+		const remaining = Math.min(100, Math.max(0, 100 - window.usedPercent));
+		const lines = [`${label}: ${remaining.toLocaleString(undefined, { maximumFractionDigits: 1 })}% remaining`];
+		const resetAt =
+			window.resetAt ??
+			(window.resetAfterSeconds !== undefined ? Date.now() / 1000 + window.resetAfterSeconds : undefined);
+		if (resetAt !== undefined) lines.push(`Resets ${this.formatUsageReset(resetAt)}`);
+		return lines.join("\n");
+	}
+
+	private handleUsageCommand(): void {
+		const usage = this.session.getSubscriptionUsage();
+		if (!usage) {
+			this.showStatus("No current subscription usage available. Send an OpenAI Codex request first.");
+			return;
+		}
+
+		const sections = [theme.bold("OpenAI Codex Usage")];
+		if (usage.planType) {
+			sections.push(
+				`${theme.fg("dim", "Plan")}\n${usage.planType.charAt(0).toUpperCase()}${usage.planType.slice(1)}`,
+			);
+		}
+		const allowances = [];
+		if (usage.primary) allowances.push(this.formatUsageWindow(usage.primary, "primary"));
+		if (usage.secondary) allowances.push(this.formatUsageWindow(usage.secondary, "secondary"));
+		if (allowances.length > 0) sections.push(`${theme.fg("dim", "Allowances")}\n${allowances.join("\n\n")}`);
+		if (usage.promo) {
+			const promoLines = [];
+			if (usage.promo.title) promoLines.push(usage.promo.title);
+			if (usage.promo.message && usage.promo.message !== usage.promo.title) promoLines.push(usage.promo.message);
+			if (usage.promo.multiplier !== undefined) promoLines.push(`${usage.promo.multiplier}× usage limits`);
+			if (usage.promo.expiresAt !== undefined)
+				promoLines.push(`Available through ${this.formatUsageReset(usage.promo.expiresAt)}`);
+			if (promoLines.length > 0) sections.push(`${theme.fg("dim", "Promotion")}\n${promoLines.join("\n")}`);
+		}
+		if (usage.credits?.unlimited || usage.credits?.hasCredits) {
+			const credits = usage.credits.unlimited ? "Unlimited" : (usage.credits.balance ?? "Available");
+			sections.push(`${theme.fg("dim", "Credits")}\n${credits}`);
+		}
+		if (usage.limitReached || usage.allowed === false) {
+			sections.push(`${theme.fg("warning", "Requests are currently blocked by your subscription limit.")}`);
+		}
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(sections.join("\n\n"), 1, 0));
 		this.ui.requestRender();
 	}
 
