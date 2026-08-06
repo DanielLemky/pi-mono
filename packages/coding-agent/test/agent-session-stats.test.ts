@@ -1,6 +1,7 @@
 import { Agent } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
+	createAssistantMessageEventStream,
 	getModel,
 	streamSimple,
 	type ToolResultMessage,
@@ -98,6 +99,38 @@ function syncAgentMessages(session: AgentSession, sessionManager: SessionManager
 }
 
 describe("AgentSession.getSessionStats", () => {
+	it("caches the latest subscription usage in memory", async () => {
+		const { session } = await createSession();
+		const usage = {
+			provider: "openai-codex" as const,
+			planType: "plus",
+			primary: { usedPercent: 7, windowMinutes: 300 },
+			promo: { title: "Double limits", multiplier: 2, expiresAt: 1786465200 },
+		};
+		session.agent.streamFunction = () => {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok", 10, Date.now());
+				const partial = { ...message, content: [], stopReason: "pending" as const };
+				stream.push({ type: "start", partial });
+				stream.push({ type: "subscription_usage", usage, partial });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		try {
+			expect(session.getSubscriptionUsage()).toBeUndefined();
+			await session.prompt("hello");
+			const snapshot = session.getSubscriptionUsage();
+			expect(snapshot).toEqual(usage);
+			if (snapshot?.primary) snapshot.primary.usedPercent = 99;
+			expect(session.getSubscriptionUsage()?.primary?.usedPercent).toBe(7);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("exposes the current context usage alongside token totals", async () => {
 		const { session, sessionManager } = await createSession();
 

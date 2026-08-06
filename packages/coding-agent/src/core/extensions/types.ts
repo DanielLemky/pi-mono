@@ -25,6 +25,7 @@ import type {
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
+	OpenAICodexSubscriptionUsage,
 	Provider,
 	ProviderHeaders,
 	RefreshModelsContext,
@@ -340,6 +341,8 @@ export interface ExtensionContext {
 	shutdown(): void;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
+	/** Get the latest provider-reported subscription usage for this in-memory session. */
+	getSubscriptionUsage(): OpenAICodexSubscriptionUsage | undefined;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
@@ -1651,6 +1654,7 @@ export interface ExtensionContextActions {
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
+	getSubscriptionUsage: () => OpenAICodexSubscriptionUsage | undefined;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;

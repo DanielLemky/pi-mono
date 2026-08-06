@@ -105,10 +105,28 @@ describe("ExtensionRunner", () => {
 		hasPendingMessages: () => false,
 		shutdown: () => {},
 		getContextUsage: () => undefined,
+		getSubscriptionUsage: () => undefined,
 		compact: () => {},
 		getSystemPrompt: () => "",
 		getScopedModels: () => [],
 	};
+
+	describe("subscription usage", () => {
+		it("exposes the latest subscription usage through ExtensionContext", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const usage = {
+				provider: "openai-codex" as const,
+				planType: "plus",
+				primary: { usedPercent: 7, windowMinutes: 300 },
+				promo: { message: "Twice the usage", multiplier: 2 },
+			};
+			runner.bindCore(extensionActions, { ...extensionContextActions, getSubscriptionUsage: () => usage });
+
+			expect(runner.createContext().getSubscriptionUsage()).toEqual(usage);
+			expect(runner.createCommandContext().getSubscriptionUsage()).toEqual(usage);
+		});
+	});
 
 	describe("scopedModels", () => {
 		it("reflects the getScopedModels context action on ctx.scopedModels", async () => {

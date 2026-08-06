@@ -30,6 +30,7 @@ import type {
 	AuthResult,
 	ImageContent,
 	Model,
+	OpenAICodexSubscriptionUsage,
 	ProviderHeaders,
 	TextContent,
 	Usage,
@@ -313,6 +314,7 @@ export class AgentSession {
 	private _isAgentRunActive = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
+	private _latestSubscriptionUsage: OpenAICodexSubscriptionUsage | undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -593,6 +595,10 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "message_update" && event.assistantMessageEvent.type === "subscription_usage") {
+			this._latestSubscriptionUsage = structuredClone(event.assistantMessageEvent.usage);
+		}
+
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -885,6 +891,11 @@ export class AgentSession {
 	/** Current effective system prompt (includes any per-turn extension modifications) */
 	get systemPrompt(): string {
 		return this.agent.state.systemPrompt;
+	}
+
+	/** Latest provider-reported subscription usage for this in-memory session. */
+	getSubscriptionUsage(): OpenAICodexSubscriptionUsage | undefined {
+		return this._latestSubscriptionUsage ? structuredClone(this._latestSubscriptionUsage) : undefined;
 	}
 
 	/** Current retry attempt (0 if not retrying) */
@@ -2413,6 +2424,7 @@ export class AgentSession {
 					this._extensionShutdownHandler?.();
 				},
 				getContextUsage: () => this.getContextUsage(),
+				getSubscriptionUsage: () => this.getSubscriptionUsage(),
 				compact: (options) => {
 					void (async () => {
 						try {
